@@ -585,9 +585,11 @@ as the APK is** — nothing separate to vet at the `.so` level.
 
 - **Integrity is a `pkg/`-layer, one-time concern, not a per-load one.** The right design is a single
   APK v2/v3 signature verification when a4l *opens* the APK (mirroring Android install-time), after
-  which every extracted `.so` is trusted by construction. a4l does **not** do this yet (`pkg/apk.cpp`
-  only parses ZIP structure) — a bounded, standard task to add before running untrusted APKs. The NDK
-  loader itself stays signature-free.
+  which every extracted `.so` is trusted by construction. a4l does this as of 2026-11-14
+  (`src/pkg/apk_verify.cpp`): v2, v3 and v3.1, enforced with `--verify=require` or a pinned
+  `--signer`, and by default only refusing a signature that fails. One gap: the runtime re-reads
+  the APK by path, so "by construction" holds only while nobody replaces the file. The NDK loader
+  itself stays signature-free.
 - **The real runtime worry is containment, not signing.** Signing says *who authored* the code, not
   that it's *safe*. Once an app `.so` runs it is arbitrary native code in a4l's **single glibc
   process** — no per-app UID / SELinux / seccomp cage like on-device Android — so it can reach ART,

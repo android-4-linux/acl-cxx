@@ -70,7 +70,7 @@ across the boundary, input, audio and a real APK (S2-S5) are not done.
 
 | | Condition | Today |
 |---|---|---|
-| C1 | APK v2/v3 verification in `pkg/`, in the broker | not implemented; `pkg/apk.cpp` parses ZIP only |
+| C1 | APK v2/v3 verification in `pkg/`, in the broker | implemented 2026-11-14 (`pkg/apk_verify.cpp`), enforced by `--verify=require` or `--signer`; the runtime reopens the APK by path, so the verified read is not the only read |
 | C2 | Split path at S5: a real APK renders and takes input | S1 done; S2 seam wired, no pixels |
 | C3 | Native GL and video cross the boundary as dma-buf | not designed; see below |
 | C4 | Child confined per Decision 2 | none; `posix_spawn` passes `environ`, no attributes |

@@ -311,6 +311,15 @@ if have_secret
   message('svc/keystore Secret Service backend enabled (libsecret ' + secret_dep.version() + ')')
 endif
 
+# pkg/ APK signature verification (ADR-0009 C1): OpenSSL's libcrypto (Apache-2.0 from 3.0) supplies
+# SHA-2, RSA, ECDSA and X.509 parsing. Absent -> the verifier reports "unavailable" and checks
+# nothing, which `--verify=require` treats as a refusal.
+crypto_dep = dependency('libcrypto', version : '>= 3.0', required : false)
+have_libcrypto = crypto_dep.found()
+if have_libcrypto
+  message('pkg APK signature verification enabled (libcrypto ' + crypto_dep.version() + ')')
+endif
+
 conf = configuration_data()
 conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
@@ -328,6 +337,7 @@ conf.set10('ACL_HAVE_SDBUS', have_sdbus)
 # presenter and the Ganesh Vulkan device. Host GL alone is not enough to compile it.
 conf.set10('ACL_GL_PRESENT', have_gl and have_vulkan and have_wcs)
 conf.set10('ACL_HAVE_SECRET', have_secret)
+conf.set10('ACL_HAVE_LIBCRYPTO', have_libcrypto)
 # Connectivity backend build mode: auto (compile all, probe the bus) | networkd |
 # networkmanager | connman | null. Backends whose macro is 0 are compiled out.
 conf.set10('ACL_NET_NETWORKD', have_sdbus and (net_backend == 'auto' or net_backend == 'networkd'))

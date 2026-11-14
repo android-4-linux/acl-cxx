@@ -77,6 +77,7 @@ void Apk::reset() noexcept {
   size_ = 0;
   fd_ = -1;
   entries_.clear();
+  layout_ = {};
   path_.clear();
 }
 
@@ -89,7 +90,8 @@ Apk::Apk(Apk&& o) noexcept
       fd_(o.fd_),
       base_(o.base_),
       size_(o.size_),
-      entries_(std::move(o.entries_)) {
+      entries_(std::move(o.entries_)),
+      layout_(o.layout_) {
   o.fd_ = -1;
   o.base_ = nullptr;
   o.size_ = 0;
@@ -103,6 +105,7 @@ Apk& Apk::operator=(Apk&& o) noexcept {
     base_ = o.base_;
     size_ = o.size_;
     entries_ = std::move(o.entries_);
+    layout_ = o.layout_;
     o.fd_ = -1;
     o.base_ = nullptr;
     o.size_ = 0;
@@ -179,6 +182,9 @@ bool Apk::index_central_directory(ZipError& out_error) {
     out_error = err(ZipStatus::BadArchive, "central directory out of bounds");
     return false;
   }
+  layout_.cd_offset = cd_offset;
+  layout_.cd_size = cd_size;
+  layout_.eocd_offset = static_cast<std::uint64_t>(eocd - base_);
 
   entries_.reserve(total);
   const std::uint8_t* p = base_ + cd_offset;

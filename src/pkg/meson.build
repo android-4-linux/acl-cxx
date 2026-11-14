@@ -6,7 +6,7 @@
 # binary-XML manifest parsing move to libandroidfw when it is vendored.
 module_libs += static_library(
   'acl_pkg',
-  files('pkg.cpp', 'apk.cpp', 'manifest.cpp'),
+  files('pkg.cpp', 'apk.cpp', 'apk_verify.cpp', 'manifest.cpp'),
   include_directories : [config_inc, core_inc],
-  dependencies : zlib_dep,
+  dependencies : [zlib_dep, crypto_dep],
 )

@@ -16,6 +16,7 @@ unit_test_sources = files(
   'ipc_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',
+  'apk_verify_test.cpp',
   'manifest_test.cpp',
   'dex_test.cpp',
   'gfx_test.cpp',
@@ -60,7 +61,28 @@ if python3.found()
   test_env.set('ACL_AXML_UTF16', axml_utf16.full_path())
   test_env.set('ACL_FIXTURE_DEX', fixture_dex.full_path())
   fixture_deps = [fixture_apk, axml_utf16, fixture_dex]
+
+  # Signed, mis-signed and tampered APKs for pkg/apk_verify (ADR-0009 C1). Keys are
+  # generated at build time by the `openssl` command, so no key or binary is committed.
+  # The APKs land in a directory beside the manifest, which is the declared output.
+  openssl_prog = find_program('openssl', required : false)
+  have_signed_apks = openssl_prog.found()
+  if have_signed_apks
+    signed_apks_dir = meson.current_build_dir() / 'signed-apks'
+    signed_apks = custom_target(
+      'signed-apks',
+      input : files('../fixtures/make_signed_apks.py'),
+      output : 'signed-apks.manifest',
+      command : [python3, '@INPUT@', signed_apks_dir, '@OUTPUT@'],
+    )
+    test_env.set('ACL_SIGNED_APKS_DIR', signed_apks_dir)
+    test_env.set('ACL_SIGNED_APKS_MANIFEST', signed_apks.full_path())
+    fixture_deps += signed_apks
+  else
+    warning('openssl not found; pkg/ signature tests will SKIP.')
+  endif
 else
+  have_signed_apks = false
   warning('python3 not found; pkg/ fixture tests will SKIP.')
 endif
 
