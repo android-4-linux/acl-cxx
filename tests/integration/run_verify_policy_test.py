@@ -7,10 +7,26 @@
 # seams. --vm=null keeps a VM out of it: an admitted APK exits 0 after the
 # package layer, a refused one exits 3 before it.
 #
+# It also asserts where the bytes come from. An enforcing policy must run a
+# private, verified copy rather than the path it was given, and a package name
+# taken from a manifest must not steer extraction out of a4l's cache.
+#
+# Every run gets a throwaway XDG_CACHE_HOME, so the test never touches the
+# user's own cache.
+#
 # Usage: run_verify_policy_test.py <a4l_binary> <apk_dir> <manifest>
+import glob
+import io
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import zipfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "fixtures"))
+from make_axml import build_axml  # noqa: E402
 
 OK, USAGE, REFUSED = 0, 1, 3
 
@@ -33,13 +49,17 @@ def main() -> int:
     upper_colons = ":".join(pin[i:i + 2].upper() for i in range(0, 64, 2))
 
     failures = []
+    scratch = tempfile.mkdtemp(prefix="a4l-verify-policy-")
+    cache = os.path.join(scratch, "cache")
 
     def expect(code, *args, env=None):
         full_env = {k: v for k, v in os.environ.items()
                     if not k.startswith("ACL_APK_")}
+        full_env["XDG_CACHE_HOME"] = cache
         full_env.update(env or {})
         argv = [a4l, *args]
-        argv = [os.path.join(apk_dir, a) if a.endswith(".apk") else a
+        argv = [os.path.join(apk_dir, a)
+                if a.endswith(".apk") and not os.path.isabs(a) else a
                 for a in argv]
         p = subprocess.run(argv, capture_output=True, text=True, timeout=60,
                            env=full_env)
@@ -86,6 +106,80 @@ def main() -> int:
     expect(REFUSED, *run, signed, env={"ACL_APK_SIGNER": other})
     expect(OK, *run, "--signer=" + pin, signed, env={"ACL_APK_SIGNER": other})
     expect(USAGE, *run, signed, env={"ACL_APK_SIGNER": "zz"})
+
+    # --- an enforcing policy runs a private copy, not the path it was given ---
+    def read(path):
+        with open(path, "rb") as f:
+            return f.read()
+
+    def check(ok, what):
+        if not ok:
+            failures.append(what)
+
+    shutil.rmtree(cache, ignore_errors=True)
+    src = os.path.join(scratch, "app.apk")
+    shutil.copy(os.path.join(apk_dir, "ok-v2-eocd-comment.apk"), src)
+    original = read(src)
+    out = expect(OK, *run, "--verify=require", src)
+    copies = glob.glob(os.path.join(cache, "acl", "verified", "*", "base.apk"))
+    check(len(copies) == 1, f"want one verified copy, found {copies}")
+    if len(copies) == 1:
+        copy = copies[0]
+        check(f"running the verified copy {copy} (copied)" in out,
+              "first enforced run did not report a fresh copy:\n" + out)
+        check(read(copy) == original, "verified copy differs from the source")
+        check(os.stat(copy).st_mode & 0o777 == 0o400, "copy is not mode 0400")
+        lib = os.path.join(os.path.dirname(copy), "lib", "libfoo.so")
+        check(os.path.exists(lib), "native lib not extracted beside the copy")
+        check(f"-> {os.path.dirname(lib)}" in out,
+              "libraries were not loaded from beside the copy:\n" + out)
+
+        # The source is rewritten after it was verified once. Its signing block
+        # is intact, so it maps to the same copy; the copy runs and the changed
+        # bytes are never read.
+        with open(src, "r+b") as f:
+            f.seek(40)
+            f.write(bytes([original[40] ^ 0x01]))
+        out = expect(OK, *run, "--verify=require", src)
+        check("(reused)" in out, "second enforced run did not reuse:\n" + out)
+        check(read(copy) == original, "copy changed after the source did")
+        # Damage to the copy itself is caught too: with the source also bad,
+        # there is nothing left that verifies.
+        os.chmod(copy, 0o600)
+        with open(copy, "r+b") as f:
+            f.seek(41)
+            f.write(b"\xff")
+        expect(REFUSED, *run, "--verify=require", src)
+        check(not glob.glob(os.path.join(cache, "acl", "verified", "*")),
+              "a copy that does not verify was left in the cache")
+    # The reporting modes leave the path alone and make no copy.
+    shutil.rmtree(cache, ignore_errors=True)
+    out = expect(OK, *run, signed)
+    check("verified copy" not in out and
+          not os.path.exists(os.path.join(cache, "acl", "verified")),
+          "--verify=warn made a copy:\n" + out)
+
+    # --- a manifest's package name cannot steer extraction out of the cache ---
+    shutil.rmtree(cache, ignore_errors=True)
+    for hostile in ["../../../escaped", "/" + os.path.join(scratch, "abs"),
+                    "com.example/../../../../escaped2"]:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("AndroidManifest.xml", build_axml(package=hostile))
+            z.writestr("classes.dex", b"dex\n035\x00" + bytes(64))
+            z.writestr("lib/x86_64/libevil.so", b"\x7fELF")
+            z.writestr("lib/arm64-v8a/libevil.so", b"\x7fELF")
+        hostile_apk = os.path.join(scratch, "hostile.apk")
+        with open(hostile_apk, "wb") as f:
+            f.write(buf.getvalue())
+        expect(OK, *run, hostile_apk)
+        landed = [os.path.relpath(p, scratch)
+                  for p in glob.glob(os.path.join(scratch, "**", "libevil.so"),
+                                     recursive=True)]
+        check(landed == [os.path.join("cache", "acl", "app", "lib",
+                                      "libevil.so")],
+              f"package {hostile!r} put a library at {landed}")
+    shutil.rmtree(scratch, ignore_errors=True)
 
     if failures:
         sys.stderr.write("\n".join("FAIL: " + f for f in failures) + "\n")

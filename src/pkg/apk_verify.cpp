@@ -54,6 +54,31 @@ const char* sig_scheme_name(int scheme) noexcept {
   }
 }
 
+std::span<const std::uint8_t> signing_block(const Apk& apk) noexcept {
+  // Framing only: a size, then pairs, then the same size and a 16-byte magic,
+  // ending exactly where the central directory starts.
+  static constexpr char kMagic[] = "APK Sig Block 42";
+  const std::span<const std::uint8_t> file = apk.bytes();
+  const std::uint64_t cd = apk.layout().cd_offset;
+  if (cd < 32 || cd > file.size() ||
+      std::memcmp(file.data() + cd - 16, kMagic, 16) != 0) {
+    return {};
+  }
+  const auto u64_at = [&](std::uint64_t off) {
+    std::uint64_t v = 0;
+    for (int i = 7; i >= 0; --i)
+      v = v << 8 | file[off + static_cast<std::uint64_t>(i)];
+    return v;
+  };
+  const std::uint64_t size = u64_at(cd - 24);
+  if (size < 24 || size > cd - 8)
+    return {};
+  const std::uint64_t start = cd - size - 8;
+  if (u64_at(start) != size)
+    return {};
+  return file.subspan(start, size + 8);
+}
+
 namespace {
 
 // Lowercase hex without separators, or empty if `v` is not a SHA-256 digest.

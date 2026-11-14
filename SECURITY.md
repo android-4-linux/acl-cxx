@@ -28,17 +28,21 @@ where the project is, stated so that nobody spends a report on them:
   default it refuses an APK whose signature is present and fails, and runs an unsigned APK with a
   warning, because development builds are unsigned. `--verify=require` runs only an APK that
   verifies. `--signer=<sha256>` runs only an APK signed by that certificate, and
-  `a4l verify <app.apk>` prints the digest to pin. Not checked: v1 (JAR) signatures, fs-verity
-  digests, and a key-rotation lineage. Two limits remain. A valid signature says who signed the
-  code, not that the code is safe. And the runtime reopens the APK by path after the check, so
-  whoever can replace the file in between defeats it.
+  `a4l verify <app.apk>` prints the digest to pin. Under either of those two options a4l does not
+  run the file you named: it copies the APK into its own cache (`~/.cache/acl/verified/`, mode
+  0700), verifies the copy, and runs the copy and the native libraries extracted beside it, so
+  the bytes verified are the bytes run even if the original is replaced. In the default mode the
+  check is a report on the file as it was read, and the runtime reads that path again. Not
+  checked: v1 (JAR) signatures, fs-verity digests, and a key-rotation lineage. Two limits
+  remain. A valid signature says who signed the code, not that the code is safe. And the cache
+  is protected by file ownership, so a process already running as you can rewrite it.
 - **There is no sandbox.** An app's native code runs as arbitrary code in a4l's single glibc
   process, with no per-app UID, SELinux domain or seccomp filter of the kind on-device Android
   provides, so it can reach ART, Mesa and the Wayland connection. The boundary is decided and not
   built: [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md) puts everything
   an APK supplies in a confined child process that holds no display, audio or session connection,
   and lists the five conditions (C1-C5) that gate any claim to run untrusted APKs. C1, signature
-  verification, is implemented with the limits above; C2-C5 are not met.
+  verification, is met with the limits above; C2-C5 are not.
 
 The consequence is the thing to take away: **treat an APK you run under a4l as native code running
 with your own privileges, because that is what it is.** Running an untrusted APK is not yet a

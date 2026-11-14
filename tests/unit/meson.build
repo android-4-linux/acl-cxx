@@ -16,6 +16,7 @@ unit_test_sources = files(
   'ipc_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',
+  'apk_stage_test.cpp',
   'apk_verify_test.cpp',
   'manifest_test.cpp',
   'dex_test.cpp',
