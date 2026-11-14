@@ -29,6 +29,7 @@
 #include "dex/dexfile.h"
 #include "log/log.h"
 #include "pkg/apk.h"
+#include "pkg/apk_stage.h"
 #include "pkg/apk_verify.h"
 #include "pkg/manifest.h"
 #include "runtime/vm.h"
@@ -171,21 +172,12 @@ bool split_signers(std::string_view v,
   return true;
 }
 
-// Verify `apk` once, log what was found, and decide whether it may run. Runs
-// before any byte of the APK is executed (ADR-0009 C1).
-bool admit_apk(const acl::pkg::Apk& apk, const acl::pkg::VerifyPolicy& policy) {
+// Log what a signature check found and decide whether the APK may run.
+bool report_and_admit(const acl::pkg::SigResult& sig,
+                      const acl::pkg::VerifyPolicy& policy,
+                      long long ms) {
   namespace pkg = acl::pkg;
-  if (policy.mode == pkg::VerifyMode::Off && policy.signers.empty()) {
-    acl::log::w(kTag, "signature: not checked (--verify=off)");
-    return true;
-  }
-  const auto t0 = std::chrono::steady_clock::now();
-  const pkg::SigResult sig = pkg::verify_signature(apk);
-  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - t0)
-                      .count();
   const bool admit = pkg::admits(policy, sig);
-
   if (sig.verified()) {
     for (const pkg::ApkSigner& s : sig.signers) {
       acl::log::i(kTag, "signature: verified {} in {} ms, signer sha256={}",
@@ -206,6 +198,72 @@ bool admit_apk(const acl::pkg::Apk& apk, const acl::pkg::VerifyPolicy& policy) {
   }
   acl::log::w(kTag, "signature: {} ({}); running it anyway (--verify=warn)",
               pkg::sig_status_name(sig.status), sig.message);
+  return true;
+}
+
+long long ms_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - t0)
+      .count();
+}
+
+// True if the policy needs a signature to hold, as opposed to reporting on it.
+bool enforces(const acl::pkg::VerifyPolicy& policy) {
+  return policy.mode == acl::pkg::VerifyMode::Require ||
+         !policy.signers.empty();
+}
+
+// Check `apk` in place and decide whether it may run. This is the reporting
+// path (--verify=warn or off): the verdict describes the file as it was read
+// here, and the runtime reads the same path again later.
+bool admit_in_place(const acl::pkg::Apk& apk,
+                    const acl::pkg::VerifyPolicy& policy) {
+  if (policy.mode == acl::pkg::VerifyMode::Off) {
+    acl::log::w(kTag, "signature: not checked (--verify=off)");
+    return true;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  const acl::pkg::SigResult sig = acl::pkg::verify_signature(apk);
+  return report_and_admit(sig, policy, ms_since(t0));
+}
+
+// The enforcing path (--verify=require or a pinned --signer): copy the APK
+// into a4l's private cache, verify the copy, and replace `apk` and `apk_path`
+// with the copy, so that everything the runtime reads afterwards is what was
+// verified (ADR-0009 C1). Fills `lib_dir` with where its native libraries go.
+bool admit_verified_copy(std::optional<acl::pkg::Apk>& apk,
+                         std::string& apk_path,
+                         const acl::pkg::VerifyPolicy& policy,
+                         std::string& lib_dir) {
+  namespace pkg = acl::pkg;
+  std::string error;
+  const std::string root = pkg::private_cache_root(error);
+  if (root.empty()) {
+    acl::log::e(kTag,
+                "signature: no private cache to verify into ({}); "
+                "refusing to run",
+                error);
+    return false;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  pkg::StageResult res = pkg::stage_verified(*apk, root);
+  if (!res.error.empty()) {
+    acl::log::e(kTag, "signature: {}; refusing to run", res.error);
+    return false;
+  }
+  if (!report_and_admit(res.sig, policy, ms_since(t0)))
+    return false;
+  if (!res.staged) {  // admitted but not staged: the policy would be hollow
+    acl::log::e(kTag, "signature: no verified copy was made; refusing to run");
+    return false;
+  }
+  apk_path = res.staged->dir + "/base.apk";
+  lib_dir = res.staged->lib_dir;
+  acl::log::i(kTag, "signature: running the verified copy {} ({})", apk_path,
+              res.staged->reused ? "reused" : "copied");
+  // res.staged->lock_fd stays open on purpose: it marks the copy as in use
+  // until this process exits.
+  apk = std::move(res.staged->apk);
   return true;
 }
 
@@ -387,8 +445,14 @@ int cmd_run(const std::vector<std::string>& args) {
                 acl::pkg::zip_status_name(zerr.status), zerr.message);
     return kUsage;
   }
-  if (!admit_apk(*apk, verify_policy))
+  // With an enforcing policy the APK is replaced by a private, verified copy
+  // here, before the manifest is parsed or anything is extracted.
+  std::string verified_lib_dir;
+  if (enforces(verify_policy)
+          ? !admit_verified_copy(apk, apk_path, verify_policy, verified_lib_dir)
+          : !admit_in_place(*apk, verify_policy)) {
     return kRuntimeError;
+  }
 
   std::vector<std::string> dex_files;
   for (const auto& e : apk->entries()) {
@@ -487,41 +551,27 @@ int cmd_run(const std::vector<std::string>& args) {
           "native libs present but no host-compatible ABI (see abis above); "
           "System.loadLibrary will fail (needs arch match + bionic bridge)");
     } else {
-      std::string base;
-      if (const char* x = std::getenv("XDG_CACHE_HOME");
-          x != nullptr && *x != '\0')
-        base = x;
-      else if (const char* h = std::getenv("HOME"); h != nullptr && *h != '\0')
-        base = std::string(h) + "/.cache";
-      else
-        base = "/tmp";
-      const std::string libdir =
-          base + "/acl/" +
-          (manifest.package.empty() ? "app" : manifest.package) + "/lib";
-      std::error_code ec;
-      std::filesystem::create_directories(libdir, ec);
-      const std::string want = "lib/" + abi + "/";
-      int nlibs = 0;
-      for (const acl::pkg::Apk::Entry& e : apk->entries()) {
-        if (e.name.size() <= want.size() ||
-            e.name.compare(0, want.size(), want) != 0)
-          continue;
-        if (e.name.size() < 3 ||
-            e.name.compare(e.name.size() - 3, 3, ".so") != 0)
-          continue;
-        if (e.name.find('/', want.size()) != std::string::npos)
-          continue;  // flat, no nested dirs
-        acl::pkg::ZipError lerr;
-        std::vector<std::uint8_t> bytes;
-        if (!apk->read(e, bytes, lerr))
-          continue;
-        std::ofstream f(libdir + "/" + e.name.substr(want.size()),
-                        std::ios::binary | std::ios::trunc);
-        if (f) {
-          f.write(reinterpret_cast<const char*>(bytes.data()),
-                  static_cast<std::streamsize>(bytes.size()));
-          ++nlibs;
+      // A verified copy keeps its libraries beside it. Otherwise they go
+      // under a4l's cache by package name, which comes from the manifest and
+      // is reduced to a safe directory name first.
+      std::string libdir = verified_lib_dir;
+      std::string lib_error;
+      if (libdir.empty()) {
+        const std::string root = acl::pkg::private_cache_root(lib_error);
+        if (!root.empty()) {
+          libdir = root + "/" + acl::pkg::safe_package_dir(manifest.package) +
+                   "/lib";
         }
+      }
+      int nlibs = 0;
+      if (libdir.empty() ||
+          !acl::pkg::extract_native_libs(*apk, abi, libdir, nlibs, lib_error)) {
+        if (enforces(verify_policy)) {
+          acl::log::e(kTag, "native libs: {}; refusing to run", lib_error);
+          return kRuntimeError;
+        }
+        acl::log::w(kTag, "native libs: {}; System.loadLibrary may fail",
+                    lib_error);
       }
       cfg.options.push_back("-Djava.library.path=" + libdir);
       acl::log::i(kTag, "native libs: extracted {} lib(s) for abi '{}' -> {}",

@@ -27,11 +27,12 @@
 //    it can make this report the original signer instead of the rotated one.
 //    The content is the same either way; a pin on the other signer refuses.
 //
-// What this does not yet give: the runtime opens the APK again by path, so the
-// verified mapping is not the only read. Whoever can replace the file between
-// the two reads defeats the check.
+// This verifies one mapping. The runtime reads the APK again by path, so a
+// caller that relies on the verdict must run from bytes nobody else can
+// change: see apk_stage.h.
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -76,6 +77,12 @@ const char* sig_scheme_name(int scheme) noexcept;
 // yields Invalid. Reads the mapping the Apk already holds and the zip layout
 // the Apk already indexed.
 SigResult verify_signature(const Apk& apk, int platform_sdk = kPlatformSdk);
+
+// The APK Signing Block, size fields and magic included, or an empty span if
+// the file has none or its framing is inconsistent. Its bytes hold the signed
+// digest of everything else in the file, so two APKs that both verify and have
+// the same block have the same signed content.
+std::span<const std::uint8_t> signing_block(const Apk& apk) noexcept;
 
 // True if `sha256_hex` is a well-formed certificate digest: 64 hex digits,
 // upper or lower case, with or without ':' separators.
