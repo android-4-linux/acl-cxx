@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -73,6 +74,20 @@ class Apk {
 
   const std::string& path() const noexcept { return path_; }
 
+  // Where the zip structures this reader indexed sit in the file. The signature
+  // verifier (apk_verify.h) hashes exactly these regions, so the bytes that are
+  // verified and the bytes that are read cannot be two different parses.
+  struct Layout {
+    std::uint64_t cd_offset = 0;    // central directory start
+    std::uint64_t cd_size = 0;      // central directory length
+    std::uint64_t eocd_offset = 0;  // end-of-central-directory record start
+  };
+  const Layout& layout() const noexcept { return layout_; }
+  // The whole mapped file. Valid for the lifetime of this Apk.
+  std::span<const std::uint8_t> bytes() const noexcept {
+    return {base_, size_};
+  }
+
   // This build's supported ABIs in Android's preference order (primary first),
   // e.g. x86_64 -> {"x86_64","x86"}, arm64 ->
   // {"arm64-v8a","armeabi-v7a","armeabi"}.
@@ -95,6 +110,7 @@ class Apk {
   const std::uint8_t* base_ = nullptr;  // mmap'd, read-only
   std::size_t size_ = 0;
   std::vector<Entry> entries_;
+  Layout layout_;
 
   void reset() noexcept;
 };

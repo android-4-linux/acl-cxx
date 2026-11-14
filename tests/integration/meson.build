@@ -51,6 +51,19 @@ if py3.found()
     timeout : 300,
   )
 
+  # APK signature policy as the CLI exposes it (ADR-0009 C1): `a4l verify` and `a4l run` under
+  # each --verify mode, a pinned signer and the environment seams, asserted on exit codes. Needs
+  # the signed fixtures (openssl) and a libcrypto build; --vm=null keeps a VM out of it.
+  if have_signed_apks and have_libcrypto
+    test(
+      'verify-policy',
+      py3,
+      args : [files('run_verify_policy_test.py'), acl_exe, signed_apks_dir, signed_apks],
+      depends : [acl_exe, signed_apks],
+      timeout : 120,
+    )
+  endif
+
   # `acl tone` manual audio-check command: run silent (ACL_AUDIO=null) so it is
   # deterministic and device-independent; asserts generation + frame accounting and
   # that it never hangs. Needs only the binary.

@@ -8,6 +8,7 @@
 // until they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing
 // today.
 
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,7 @@
 #include "dex/dexfile.h"
 #include "log/log.h"
 #include "pkg/apk.h"
+#include "pkg/apk_verify.h"
 #include "pkg/manifest.h"
 #include "runtime/vm.h"
 
@@ -58,6 +60,9 @@ void print_usage() {
       "commands:\n"
       "  run <app.apk>        inspect and launch an APK\n"
       "  dex <file>           dump classes/methods of a .dex or .apk\n"
+      "  verify <app.apk>     check the APK's v2/v3 signature and print its "
+      "signer\n"
+      "                       certificate digest; exit 0 only if it verifies\n"
       "  tone [options]       play a test tone through the audio backend "
       "(manual\n"
       "                       audio check); streams to PipeWire, else silent "
@@ -83,6 +88,17 @@ void print_usage() {
       "(colon-\n"
       "                       separated); also read from $ACL_FRAMEWORK\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
+      "  --verify=<mode>      APK signature policy (default: $ACL_APK_VERIFY "
+      "or warn)\n"
+      "                       warn: refuse a signature that fails, run an "
+      "unsigned APK\n"
+      "                       require: run only an APK whose signature "
+      "verifies\n"
+      "                       off: check nothing\n"
+      "  --signer=<sha256>    run only an APK signed by this certificate "
+      "(comma-\n"
+      "                       separated list; also $ACL_APK_SIGNER); implies "
+      "require\n"
       "  --present            show the rendered content view in a Wayland "
       "window\n"
       "                       (wcs); no-op if no compositor / built without "
@@ -132,6 +148,128 @@ void acl_on_kill_signal(int /*sig*/) {
   std::_Exit(code);
 }
 
+// Split a comma-separated list of certificate digests into `out`. Returns
+// false, naming the bad one, if any is not a SHA-256 digest: a pin that can
+// never match must not look like a pin that did not match.
+bool split_signers(std::string_view v,
+                   std::vector<std::string>& out,
+                   std::string& bad) {
+  while (!v.empty()) {
+    const std::size_t comma = v.find(',');
+    const std::string_view one = v.substr(0, comma);
+    if (!one.empty()) {
+      if (!acl::pkg::valid_cert_digest(one)) {
+        bad = std::string(one);
+        return false;
+      }
+      out.emplace_back(one);
+    }
+    if (comma == std::string_view::npos)
+      break;
+    v.remove_prefix(comma + 1);
+  }
+  return true;
+}
+
+// Verify `apk` once, log what was found, and decide whether it may run. Runs
+// before any byte of the APK is executed (ADR-0009 C1).
+bool admit_apk(const acl::pkg::Apk& apk, const acl::pkg::VerifyPolicy& policy) {
+  namespace pkg = acl::pkg;
+  if (policy.mode == pkg::VerifyMode::Off && policy.signers.empty()) {
+    acl::log::w(kTag, "signature: not checked (--verify=off)");
+    return true;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  const pkg::SigResult sig = pkg::verify_signature(apk);
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+  const bool admit = pkg::admits(policy, sig);
+
+  if (sig.verified()) {
+    for (const pkg::ApkSigner& s : sig.signers) {
+      acl::log::i(kTag, "signature: verified {} in {} ms, signer sha256={}",
+                  pkg::sig_scheme_name(sig.scheme), ms, s.cert_sha256);
+    }
+    if (!admit) {
+      acl::log::e(kTag,
+                  "signature: signer is not one of the {} pinned "
+                  "certificate(s); refusing to run",
+                  policy.signers.size());
+    }
+    return admit;
+  }
+  if (!admit) {
+    acl::log::e(kTag, "signature: {} ({}); refusing to run",
+                pkg::sig_status_name(sig.status), sig.message);
+    return false;
+  }
+  acl::log::w(kTag, "signature: {} ({}); running it anyway (--verify=warn)",
+              pkg::sig_status_name(sig.status), sig.message);
+  return true;
+}
+
+int cmd_verify(const std::vector<std::string>& args) {
+  namespace pkg = acl::pkg;
+  std::string path;
+  std::vector<std::string> pins;
+  for (const std::string& a : args) {
+    std::string v;
+    if (match_opt(a, "--signer", v)) {
+      std::string bad;
+      if (!split_signers(v, pins, bad)) {
+        std::fprintf(stderr, "verify: '%s' is not a SHA-256 digest\n",
+                     bad.c_str());
+        return kUsage;
+      }
+    } else if (!a.empty() && a[0] == '-') {
+      std::fprintf(stderr, "verify: unknown option '%s'\n", a.c_str());
+      return kUsage;
+    } else if (path.empty()) {
+      path = a;
+    } else {
+      std::fprintf(stderr, "verify: unexpected argument '%s'\n", a.c_str());
+      return kUsage;
+    }
+  }
+  if (path.empty()) {
+    std::fprintf(stderr, "verify: missing <app.apk>\n");
+    return kUsage;
+  }
+  pkg::ZipError zerr;
+  auto apk = pkg::Apk::open(path, zerr);
+  if (!apk.has_value()) {
+    std::fprintf(stderr, "verify: cannot open %s: [%s] %s\n", path.c_str(),
+                 pkg::zip_status_name(zerr.status), zerr.message.c_str());
+    return kUsage;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  const pkg::SigResult sig = pkg::verify_signature(*apk);
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+  std::printf("status: %s\n", pkg::sig_status_name(sig.status));
+  if (!sig.verified()) {
+    std::printf("reason: %s\n", sig.message.c_str());
+    return kRuntimeError;
+  }
+  std::printf("scheme: %s\n", pkg::sig_scheme_name(sig.scheme));
+  for (const pkg::ApkSigner& s : sig.signers)
+    std::printf("signer: %s\n", s.cert_sha256.c_str());
+  if (sig.has_rotation_lineage)
+    std::printf("lineage: present, not validated\n");
+  std::printf("bytes: %zu\ntime_ms: %.1f\n", apk->bytes().size(), ms);
+  for (const std::string& pin : pins) {
+    if (pkg::signer_matches(sig, pin))
+      return kOk;
+  }
+  if (!pins.empty()) {
+    std::printf("pinned: no match\n");
+    return kRuntimeError;
+  }
+  return kOk;
+}
+
 int cmd_run(const std::vector<std::string>& args) {
   namespace r = acl::runtime;
 
@@ -146,6 +284,24 @@ int cmd_run(const std::vector<std::string>& args) {
   bool convert_dex = false;
   bool present = false;
   std::string present_frames;
+  acl::pkg::VerifyPolicy verify_policy;
+  if (const char* e = std::getenv("ACL_APK_VERIFY"); e && *e) {
+    if (!acl::pkg::parse_verify_mode(e, verify_policy.mode)) {
+      std::fprintf(stderr, "run: bad $ACL_APK_VERIFY '%s' (off|warn|require)\n",
+                   e);
+      return kUsage;
+    }
+  }
+  if (const char* e = std::getenv("ACL_APK_SIGNER"); e && *e) {
+    std::string bad;
+    if (!split_signers(e, verify_policy.signers, bad)) {
+      std::fprintf(stderr,
+                   "run: $ACL_APK_SIGNER '%s' is not a SHA-256 digest\n",
+                   bad.c_str());
+      return kUsage;
+    }
+  }
+  bool signer_flag_seen = false;
 
   // Split a colon-separated path list into `out`, skipping empties.
   const auto split_paths = [](const std::string& v,
@@ -184,6 +340,22 @@ int cmd_run(const std::vector<std::string>& args) {
       split_paths(v, extra_classpath);  // colon-separated, appended in order
     } else if (match_opt(a, "--cache", v)) {
       cache_dir = v;
+    } else if (match_opt(a, "--verify", v)) {
+      if (!acl::pkg::parse_verify_mode(v, verify_policy.mode)) {
+        std::fprintf(stderr, "run: bad --verify '%s' (off|warn|require)\n",
+                     v.c_str());
+        return kUsage;
+      }
+    } else if (match_opt(a, "--signer", v)) {
+      if (!signer_flag_seen)
+        verify_policy.signers.clear();  // the flag replaces $ACL_APK_SIGNER
+      signer_flag_seen = true;
+      std::string bad;
+      if (!split_signers(v, verify_policy.signers, bad)) {
+        std::fprintf(stderr, "run: --signer '%s' is not a SHA-256 digest\n",
+                     bad.c_str());
+        return kUsage;
+      }
     } else if (!a.empty() && a[0] == '-') {
       std::fprintf(stderr, "run: unknown option '%s'\n", a.c_str());
       return kUsage;
@@ -215,6 +387,8 @@ int cmd_run(const std::vector<std::string>& args) {
                 acl::pkg::zip_status_name(zerr.status), zerr.message);
     return kUsage;
   }
+  if (!admit_apk(*apk, verify_policy))
+    return kRuntimeError;
 
   std::vector<std::string> dex_files;
   for (const auto& e : apk->entries()) {
@@ -619,6 +793,9 @@ int main(int argc, char** argv) {
   }
   if (cmd == "dex") {
     return cmd_dex({args.begin() + 1, args.end()});
+  }
+  if (cmd == "verify") {
+    return cmd_verify({args.begin() + 1, args.end()});
   }
   if (cmd == "tone") {
     return cmd_tone({args.begin() + 1, args.end()});

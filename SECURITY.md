@@ -23,15 +23,22 @@ assessed against `main`.
 Two properties of the current state are **known, documented and not vulnerabilities** — they are
 where the project is, stated so that nobody spends a report on them:
 
-- **APK signatures are not verified.** `pkg/apk.cpp` parses ZIP structure only. Single-shot
-  APK v2/v3 verification at open time is designed and intended, mirroring Android's install-time
-  check, and is not implemented.
+- **APK signatures are checked, and not required unless you ask.** `a4l run` verifies an APK's
+  v2, v3 or v3.1 signature once, before executing any of it (`src/pkg/apk_verify.cpp`). By
+  default it refuses an APK whose signature is present and fails, and runs an unsigned APK with a
+  warning, because development builds are unsigned. `--verify=require` runs only an APK that
+  verifies. `--signer=<sha256>` runs only an APK signed by that certificate, and
+  `a4l verify <app.apk>` prints the digest to pin. Not checked: v1 (JAR) signatures, fs-verity
+  digests, and a key-rotation lineage. Two limits remain. A valid signature says who signed the
+  code, not that the code is safe. And the runtime reopens the APK by path after the check, so
+  whoever can replace the file in between defeats it.
 - **There is no sandbox.** An app's native code runs as arbitrary code in a4l's single glibc
   process, with no per-app UID, SELinux domain or seccomp filter of the kind on-device Android
   provides, so it can reach ART, Mesa and the Wayland connection. The boundary is decided and not
   built: [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md) puts everything
   an APK supplies in a confined child process that holds no display, audio or session connection,
-  and lists the five conditions (C1-C5) that gate any claim to run untrusted APKs. None is met.
+  and lists the five conditions (C1-C5) that gate any claim to run untrusted APKs. C1, signature
+  verification, is implemented with the limits above; C2-C5 are not met.
 
 The consequence is the thing to take away: **treat an APK you run under a4l as native code running
 with your own privileges, because that is what it is.** Running an untrusted APK is not yet a

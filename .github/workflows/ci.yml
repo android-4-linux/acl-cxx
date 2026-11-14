@@ -181,7 +181,7 @@ jobs:
             # shellcheck disable=SC2086
             if timeout 240 sudo apt-get install -y $apt_opts \
                  meson ninja-build g++ pkg-config \
-                 libfmt-dev zlib1g-dev python3; then
+                 libfmt-dev zlib1g-dev libssl-dev python3; then
               exit 0
             fi
             echo "apt attempt ${attempt} failed or timed out; retrying"
@@ -315,7 +315,7 @@ jobs:
             timeout 300 sudo apt-get update -qq $apt_opts || true
             # shellcheck disable=SC2086
             if timeout 300 sudo apt-get install -y $apt_opts \
-                 meson ninja-build g++ pkg-config libfmt-dev zlib1g-dev python3 \
+                 meson ninja-build g++ pkg-config libfmt-dev zlib1g-dev libssl-dev python3 \
                  libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
                  libvulkan-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
                  libfreetype-dev libfontconfig-dev libpugixml-dev; then

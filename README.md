@@ -45,7 +45,8 @@ reaches a useful milestone ahead of the phone/View path.
 > the legacy **`gles_jni`** EGL10/GLES JNI is registered, so `GLSurfaceView` apps (libGDX) run and
 > take input. What is still open is narrower than those: apps whose own GL draws to an FBO can
 > present nothing, a GLES3-heavy app can link its whole native stack and then trip a robustness bug
-> in a4l's JNI bridge, and a4l does not verify APK signatures or confine an app's native code (see
+> in a4l's JNI bridge, and a4l does not confine an app's native code. APK signatures are checked,
+> and required only when asked with `--verify=require` or a pinned `--signer` (see
 > [`SECURITY.md`](SECURITY.md)). `docs/app-corpus-status.md` tracks the corpus app by app and dates
 > every claim. The authoritative design is [`plan.md`](plan.md); contributor guidance is in
 > [`CONTRIBUTING.md`](CONTRIBUTING.md).
